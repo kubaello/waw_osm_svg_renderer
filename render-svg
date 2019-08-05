@@ -65,6 +65,7 @@ def main(args):
     if args.region_name is None:
         print('available regions:')
         print(', '.join(sorted(name for name in g8_adm['name'] if name is not None)))
+        exit()
 
     print('processing')
     waw = pd_filter(g8_adm, 'name', lambda x: x == 'Warszawa')
