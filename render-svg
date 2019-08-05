@@ -1,0 +1,128 @@
+#! /usr/bin/env python3
+# coding: utf-8
+
+import argparse
+import cartopy
+import geopandas as gp
+import pint
+import shapely
+import svgwrite
+#import matplotlib.pyplot as plt
+
+ureg = pint.UnitRegistry()
+
+ADM8_GEOJSON = 'waw_admin8.geojson'
+WISLA_GEOJSON = 'waw_wisla.geojson'
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', '-o', help='output path (default: REGION_NAME.svg)')
+    parser.add_argument('--region-name', '-r', help='administrative region which borders will be rendered in relation to Warsaw\'s')
+    parser.add_argument('--scale', '-s', type=float, default=5e-6, help='map scale (unitless) (default: %(default)s)')
+    parser.add_argument('--dpi', '-d', type=float, default=100, help='DPI of the rendered image (default: %(default)s)')
+    parser.add_argument('--margin', type=str, default='2cm', help='image margin expressed in some length units (default: %(default)s)')
+    return parser.parse_args()
+
+def pd_filter(data, key, predicate):
+    return data[data[key].apply(predicate)]
+
+def merge_bounds(bounds_lst):
+    x1s, y1s, x2s, y2s = zip(*bounds_lst)
+    return min(x1s), min(y1s), max(x2s), max(y2s)
+
+def coords_bounds(coords):
+    return min(c[0] for c in coords), min(c[1] for c in coords), max(c[0] for c in coords), max(c[1] for c in coords)
+
+def bounds_size(bounds):
+    return bounds[2] - bounds[0], bounds[3] - bounds[1]
+
+def bounds_ratio(bounds):
+    return (bounds[2] - bounds[0]) / (bounds[3] - bounds[1])
+
+def fit_coords_to_bounds(coords, old_bounds, new_bounds):
+    ow, oh = bounds_size(old_bounds)
+    nw, nh = bounds_size(new_bounds)
+    sx = nw / ow
+    sy = nh / oh
+    off_x = new_bounds[0] - old_bounds[0] * sx
+    off_y = new_bounds[1] - old_bounds[1] * sy
+    return [(x * sx + off_x, y * sy + off_y) for x, y in coords]
+
+def extract_river_bank(gds):
+    area_geoms = [g for g in gds['geometry'] if 'LineString' not in g.geom_type]
+    union = shapely.ops.unary_union(area_geoms)
+    ext_polys = [shapely.geometry.Polygon(part.exterior) for part in union]
+    return sorted(ext_polys, key=lambda p: p.area)[-1]
+
+def main(args):
+
+    print('loading %s' % ADM8_GEOJSON)
+    g8 = gp.read_file(ADM8_GEOJSON)
+    g8_adm = pd_filter(g8, 'boundary', lambda x: x == 'administrative')
+    print('loading %s' % WISLA_GEOJSON)
+    wisla_all = gp.read_file(WISLA_GEOJSON)
+
+    if args.region_name is None:
+        print('available regions:')
+        print(', '.join(sorted(name for name in g8_adm['name'] if name is not None)))
+
+    print('processing')
+    waw = pd_filter(g8_adm, 'name', lambda x: x == 'Warszawa')
+    other = pd_filter(g8_adm, 'name', lambda x: x == args.region_name)
+
+    waw_g = list(waw['geometry'])[0]
+    other_g = list(other['geometry'])[0]
+
+    wisla_bank = extract_river_bank(wisla_all)
+    wisla_waw_g = wisla_bank.intersection(waw_g)
+
+    all_gdf = gp.GeoDataFrame(crs=waw.crs, geometry=[waw_g, other_g, wisla_waw_g, waw_g])
+    crso = cartopy.crs.Orthographic(waw_g.centroid.x, waw_g.centroid.y)
+    proj = all_gdf.to_crs(crso.proj4_init)
+    #plt.axis('equal')
+    #plt.plot(*proj['geometry'][0].boundary.xy)
+
+    geoms = list(proj['geometry'])
+
+    dpi = 100 * ureg.DPI
+    scale = 5e-6
+    detail = 2 * ureg.pixel
+    detail_m = (detail/dpi/scale).m_as(ureg.meter)
+    geoms_s = [g.simplify(detail_m) for g in geoms]
+
+    styles = [
+        dict(stroke='none', fill=svgwrite.rgb(0,0,255), stroke_width=3, stroke_linejoin='round'),
+        dict(stroke=svgwrite.rgb(0,0,0), fill=svgwrite.rgb(255,0,0), stroke_width=3, stroke_linejoin='round'),
+        dict(stroke='none', fill=svgwrite.rgb(17,108,215), stroke_width=1, stroke_linejoin='round'),
+        dict(stroke=svgwrite.rgb(255,0,0), fill='none', stroke_width=3, stroke_linejoin='round'),
+    ]
+
+    orig_coords = [g.boundary.coords for g in geoms_s]
+    orig_bounds = merge_bounds([coords_bounds(c) for c in orig_coords])
+
+    margin = ureg(args.margin)
+    if not margin.check({'[length]': 1}):
+        raise ValueError
+    margin_px = dpi * margin
+
+    w_m, h_m = bounds_size(orig_bounds) * ureg.meter
+    w = dpi * (scale * w_m) + 2*margin_px
+    h = dpi * (scale * h_m) + 2*margin_px
+
+    img_map_bounds_px = tuple(x.m_as('pixel') for x in (margin_px, h-margin_px, w-margin_px, margin_px))
+
+    coords = [fit_coords_to_bounds(c, orig_bounds, img_map_bounds_px) for c in orig_coords]
+
+    out_path = args.output
+    if out_path is None:
+        out_path = '%s.svg' % args.region_name
+
+    print('writing %s' % out_path)
+    w_px, h_px = (x.m_as('pixel') for x in (w,h))
+    dwg = svgwrite.Drawing(out_path, (w_px, h_px), profile='tiny')
+    for c, st in zip(coords, styles):
+        dwg.add(svgwrite.shapes.Polygon(c, **st))
+    dwg.save()
+
+if __name__ == '__main__':
+    main(parse_args())
