@@ -86,7 +86,7 @@ def main(args):
     geoms = list(proj['geometry'])
 
     dpi = 100 * ureg.DPI
-    scale = 5e-6
+    scale = args.scale
     detail = 2 * ureg.pixel
     detail_m = (detail/dpi/scale).m_as(ureg.meter)
     geoms_s = [g.simplify(detail_m) for g in geoms]
